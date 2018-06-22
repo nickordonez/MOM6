@@ -10,3 +10,6 @@
 [submodule "pkg/geoKdTree"]
 	path = pkg/geoKdTree
 	url = https://github.com/travissluka/geoKdTree.git
+[submodule "pkg/drifters"]
+	path = pkg/drifters
+	url = https://github.com/nickordonez/drifters.git
