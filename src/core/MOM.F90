@@ -127,6 +127,7 @@ use MOM_offline_main,          only : offline_redistribute_residual, offline_dia
 use MOM_offline_main,          only : offline_fw_fluxes_into_ocean, offline_fw_fluxes_out_ocean
 use MOM_offline_main,          only : offline_advection_layer, offline_transport_end
 use MOM_ALE,                   only : ale_offline_tracer_final, ALE_main_offline
+use MOM_particles_mod,         only : particles, particles_init
 
 implicit none ; private
 
@@ -290,6 +291,7 @@ type, public :: MOM_control_struct ; private
   real    :: bad_val_sst_min    !< Minimum SST before triggering bad value message
   real    :: bad_val_sss_max    !< Maximum SSS before triggering bad value message
   real    :: bad_vol_col_thick  !< Minimum column thickness before triggering bad value message
+  logical :: use_particles      !< Turns on the particles package.
 
   ! Structures and handles used for diagnostics.
   type(MOM_diag_IDs) :: IDs
@@ -334,6 +336,7 @@ type, public :: MOM_control_struct ; private
   type(ODA_CS), pointer                  :: odaCS => NULL() !< a pointer to the control structure for handling
                                                  !! ensemble model state vectors and data assimilation
                                                  !! increments and priors
+  type(particles), pointer               :: particles => NULL() !< Lagrangian particles 
 end type MOM_control_struct
 
 public initialize_MOM, finish_MOM_initialization, MOM_end
@@ -1883,6 +1886,8 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
                     fail_if_missing=.true.)
   endif
 
+  call get_param(param_file, "MOM", "USE_PARTICLES", CS%use_particles, &
+                 "If true, use the particles package.", default=.false.)
 
   CS%ensemble_ocean=.false.
   call get_param(param_file, "MOM", "ENSEMBLE_OCEAN", CS%ensemble_ocean, &
@@ -2419,6 +2424,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
 
   if (CS%ensemble_ocean) then
       call init_oda(Time, G, GV, CS%odaCS)
+  endif
+
+  if (CS%use_particles) then
+    call particles_init(CS%particles, G, CS%Time, CS%dt_therm, CS%u, CS%v)
   endif
 
   call callTree_leave("initialize_MOM()")
