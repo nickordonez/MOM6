@@ -127,8 +127,7 @@ use MOM_offline_main,          only : offline_redistribute_residual, offline_dia
 use MOM_offline_main,          only : offline_fw_fluxes_into_ocean, offline_fw_fluxes_out_ocean
 use MOM_offline_main,          only : offline_advection_layer, offline_transport_end
 use MOM_ALE,                   only : ale_offline_tracer_final, ALE_main_offline
-use MOM_particles_mod,         only : particles, particles_init
-
+use MOM_particles_mod,         only : particles, particles_init, particles_run
 implicit none ; private
 
 #include <MOM_memory.h>
@@ -1268,6 +1267,10 @@ subroutine step_MOM_thermo(CS, G, GV, u, v, h, tv, fluxes, dtdia, &
   call disable_averaging(CS%diag)
 
   if (showCallTree) call callTree_leave("step_MOM_thermo(), MOM.F90")
+
+  if (CS%use_particles) then
+    call particles_run(CS%particles,CS%Time,CS%u(:,:,1),CS%v(:,:,1)) ! Run the particles model
+  endif
 
 end subroutine step_MOM_thermo
 
