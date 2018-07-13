@@ -1117,6 +1117,7 @@ subroutine step_MOM_thermo(CS, G, GV, u, v, h, tv, fluxes, dtdia, &
   logical :: use_ice_shelf ! Needed for selecting the right ALE interface.
   logical :: showCallTree
   type(group_pass_type) :: pass_T_S, pass_T_S_h, pass_uv_T_S_h
+  type(time_type) :: part_time
   integer :: dynamics_stencil  ! The computational stencil for the calculations
                                ! in the dynamic core.
   integer :: i, j, k, is, ie, js, je, nz! , Isq, Ieq, Jsq, Jeq, n
@@ -1269,7 +1270,8 @@ subroutine step_MOM_thermo(CS, G, GV, u, v, h, tv, fluxes, dtdia, &
   if (showCallTree) call callTree_leave("step_MOM_thermo(), MOM.F90")
 
   if (CS%use_particles) then
-    call particles_run(CS%particles,CS%Time,CS%u(:,:,1),CS%v(:,:,1)) ! Run the particles model
+    part_time = CS%Time + set_time(int(floor(0.5 + 0.5*dtdia)))
+    call particles_run(CS%particles, part_time, CS%u(:,:,1), CS%v(:,:,1)) ! Run the particles model
   endif
 
 end subroutine step_MOM_thermo
