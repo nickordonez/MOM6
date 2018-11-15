@@ -1,3 +1,5 @@
+!> Configures the model for the "DOME" experiment.
+!! DOME = Dynamics of Overflows and Mixing Experiment
 module DOME_initialization
 
 ! This file is part of MOM6. See LICENSE.md for the license.
@@ -12,6 +14,7 @@ use MOM_open_boundary, only : ocean_OBC_type, OBC_NONE, OBC_SIMPLE
 use MOM_open_boundary,   only : OBC_segment_type, register_segment_tracer
 use MOM_tracer_registry, only : tracer_registry_type, tracer_type
 use MOM_tracer_registry, only : tracer_name_lookup
+use MOM_unit_scaling, only : unit_scale_type
 use MOM_variables, only : thermo_var_ptrs
 use MOM_verticalGrid, only : verticalGrid_type
 use MOM_EOS, only : calculate_density, calculate_density_derivs, EOS_type
@@ -84,10 +87,10 @@ subroutine DOME_initialize_thickness(h, G, GV, param_file, just_read_params)
   logical,       optional, intent(in)  :: just_read_params !< If present and true, this call will
                                                       !! only read parameters without changing h.
 
-  real :: e0(SZK_(GV)+1)    ! The resting interface heights, in m, usually !
-                            ! negative because it is positive upward.      !
-  real :: eta1D(SZK_(GV)+1) ! Interface height relative to the sea surface !
-                            ! positive upward, in m.                       !
+  real :: e0(SZK_(GV)+1)    ! The resting interface heights, in m, usually
+                            ! negative because it is positive upward, in depth units (Z).
+  real :: eta1D(SZK_(GV)+1) ! Interface height relative to the sea surface
+                            ! positive upward, in depth units (Z).
   logical :: just_read    ! If true, just read parameters but set nothing.
   character(len=40)  :: mdl = "DOME_initialize_thickness" ! This subroutine's name.
   integer :: i, j, k, is, ie, js, je, nz
@@ -111,14 +114,14 @@ subroutine DOME_initialize_thickness(h, G, GV, param_file, just_read_params)
 !  Angstrom thick, and 2.  the interfaces are where they should be   !
 !  based on the resting depths and interface height perturbations,   !
 !  as long at this doesn't interfere with 1.                         !
-    eta1D(nz+1) = -1.0*G%bathyT(i,j)
+    eta1D(nz+1) = -G%bathyT(i,j)
     do k=nz,1,-1
       eta1D(K) = e0(K)
-      if (eta1D(K) < (eta1D(K+1) + GV%Angstrom_z)) then
-        eta1D(K) = eta1D(K+1) + GV%Angstrom_z
-        h(i,j,k) = GV%Angstrom
+      if (eta1D(K) < (eta1D(K+1) + GV%Angstrom_Z)) then
+        eta1D(K) = eta1D(K+1) + GV%Angstrom_Z
+        h(i,j,k) = GV%Angstrom_H
       else
-        h(i,j,k) = GV%m_to_H * (eta1D(K) - eta1D(K+1))
+        h(i,j,k) = GV%Z_to_H * (eta1D(K) - eta1D(K+1))
       endif
     enddo
   enddo ; enddo
@@ -132,12 +135,13 @@ end subroutine DOME_initialize_thickness
 !! number of tracers should be restored within each sponge. The       !
 !! interface height is always subject to damping, and must always be  !
 !! the first registered field.                                        !
-subroutine DOME_initialize_sponges(G, GV, tv, PF, CSp)
+subroutine DOME_initialize_sponges(G, GV, US, tv, PF, CSp)
   type(ocean_grid_type), intent(in) :: G    !< The ocean's grid structure.
   type(verticalGrid_type), intent(in) :: GV !< The ocean's vertical grid structure.
+  type(unit_scale_type),   intent(in) :: US !< A dimensional unit scaling type
   type(thermo_var_ptrs), intent(in) :: tv   !< A structure containing pointers to any available
-               !!                 thermodynamic fields, including potential temperature and
-               !!                 salinity or mixed layer density. Absent fields have NULL ptrs.
+                               !! thermodynamic fields, including potential temperature and
+                               !! salinity or mixed layer density. Absent fields have NULL ptrs.
   type(param_file_type), intent(in) :: PF   !< A structure indicating the open file to
                                             !! parse for model parameter values.
   type(sponge_CS),       pointer    :: CSp  !< A pointer that is set to point to the control
@@ -147,7 +151,7 @@ subroutine DOME_initialize_sponges(G, GV, tv, PF, CSp)
   real :: temp(SZI_(G),SZJ_(G),SZK_(G))  ! A temporary array for other variables. !
   real :: Idamp(SZI_(G),SZJ_(G))    ! The inverse damping rate, in s-1.
 
-  real :: H0(SZK_(G))
+  real :: H0(SZK_(G))  ! Interface heights in depth units (Z)
   real :: min_depth
   real :: damp, e_dense, damp_new
   character(len=40)  :: mdl = "DOME_initialize_sponges" ! This subroutine's name.
@@ -165,10 +169,10 @@ subroutine DOME_initialize_sponges(G, GV, tv, PF, CSp)
 
 !   Set up sponges for DOME configuration
   call get_param(PF, mdl, "MINIMUM_DEPTH", min_depth, &
-                 "The minimum depth of the ocean.", units="m", default=0.0)
+                 "The minimum depth of the ocean.", units="m", default=0.0, scale=US%m_to_Z)
 
   H0(1) = 0.0
-  do k=2,nz ; H0(k) = -(real(k-1)-0.5)*G%max_depth/real(nz-1) ; enddo
+  do k=2,nz ; H0(k) = -(real(k-1)-0.5)*G%max_depth / real(nz-1) ; enddo
   do i=is,ie; do j=js,je
     if (G%geoLonT(i,j) < 100.0) then ; damp = 10.0
     elseif (G%geoLonT(i,j) < 200.0) then
@@ -188,12 +192,12 @@ subroutine DOME_initialize_sponges(G, GV, tv, PF, CSp)
     ! depth space for Boussinesq or non-Boussinesq models.
     eta(i,j,1) = 0.0
     do k=2,nz
-!     eta(i,j,K)=max(H0(k), -G%bathyT(i,j), GV%Angstrom_z*(nz-k+1)-G%bathyT(i,j))
+!     eta(i,j,K)=max(H0(k), -G%bathyT(i,j), GV%Angstrom_Z*(nz-k+1) - G%bathyT(i,j))
       e_dense = -G%bathyT(i,j)
       if (e_dense >= H0(k)) then ; eta(i,j,K) = e_dense
       else ; eta(i,j,K) = H0(k) ; endif
-      if (eta(i,j,K) < GV%Angstrom_z*(nz-k+1)-G%bathyT(i,j)) &
-          eta(i,j,K) = GV%Angstrom_z*(nz-k+1)-G%bathyT(i,j)
+      if (eta(i,j,K) < GV%Angstrom_Z*(nz-k+1) - G%bathyT(i,j)) &
+          eta(i,j,K) = GV%Angstrom_Z*(nz-k+1) - G%bathyT(i,j)
     enddo
     eta(i,j,nz+1) = -G%bathyT(i,j)
 
@@ -204,7 +208,7 @@ subroutine DOME_initialize_sponges(G, GV, tv, PF, CSp)
 
 !  This call sets up the damping rates and interface heights.
 !  This sets the inverse damping timescale fields in the sponges.    !
-  call initialize_sponge(Idamp, eta, G, PF, CSp)
+  call initialize_sponge(Idamp, eta, G, PF, CSp, GV)
 
 !   Now register all of the fields which are damped in the sponge.   !
 ! By default, momentum is advected vertically within the sponge, but !
@@ -227,7 +231,7 @@ end subroutine DOME_initialize_sponges
 
 !> This subroutine sets the properties of flow at open boundary conditions.
 !! This particular example is for the DOME inflow describe in Legg et al. 2006.
-subroutine DOME_set_OBC_data(OBC, tv, G, GV, param_file, tr_Reg)
+subroutine DOME_set_OBC_data(OBC, tv, G, GV, US, param_file, tr_Reg)
   type(ocean_OBC_type),       pointer    :: OBC !< This open boundary condition type specifies
                                                 !! whether, where, and what open boundary
                                                 !! conditions are used.
@@ -237,6 +241,7 @@ subroutine DOME_set_OBC_data(OBC, tv, G, GV, param_file, tr_Reg)
                               !! fields have NULL ptrs.
   type(ocean_grid_type),      intent(in) :: G   !< The ocean's grid structure.
   type(verticalGrid_type),    intent(in) :: GV  !< The ocean's vertical grid structure.
+  type(unit_scale_type),      intent(in) :: US  !< A dimensional unit scaling type
   type(param_file_type),      intent(in) :: param_file !< A structure indicating the open file
                               !! to parse for model parameter values.
   type(tracer_registry_type), pointer    :: tr_Reg !< Tracer registry.
@@ -250,9 +255,9 @@ subroutine DOME_set_OBC_data(OBC, tv, G, GV, param_file, tr_Reg)
   real :: rho_guess(SZK_(G)) ! Potential density at T0 & S0 in kg m-3.
   ! The following variables are used to set up the transport in the DOME example.
   real :: tr_0, y1, y2, tr_k, rst, rsb, rc, v_k, lon_im1
-  real :: D_edge            ! The thickness in m of the dense fluid at the
+  real :: D_edge            ! The thickness in Z of the dense fluid at the
                             ! inner edge of the inflow.
-  real :: g_prime_tot       ! The reduced gravity across all layers, m s-2.
+  real :: g_prime_tot       ! The reduced gravity across all layers, m2 Z-1 s-2.
   real :: Def_Rad           ! The deformation radius, based on fluid of
                             ! thickness D_edge, in the same units as lat.
   real :: Ri_trans          ! The shear Richardson number in the transition
@@ -269,7 +274,7 @@ subroutine DOME_set_OBC_data(OBC, tv, G, GV, param_file, tr_Reg)
   IsdB = G%IsdB ; IedB = G%IedB ; JsdB = G%JsdB ; JedB = G%JedB
 
   ! The following variables should be transformed into runtime parameters.
-  D_edge = 300.0  ! The thickness of dense fluid in the inflow.
+  D_edge = 300.0*US%m_to_Z  ! The thickness of dense fluid in the inflow.
   Ri_trans = 1.0/3.0 ! The shear Richardson number in the transition region
                      ! region of the specified shear profile.
 
@@ -277,7 +282,7 @@ subroutine DOME_set_OBC_data(OBC, tv, G, GV, param_file, tr_Reg)
 
   g_prime_tot = (GV%g_Earth/GV%Rho0)*2.0
   Def_Rad = sqrt(D_edge*g_prime_tot) / (1.0e-4*1000.0)
-  tr_0 = (-D_edge*sqrt(D_edge*g_prime_tot)*0.5e3*Def_Rad) * GV%m_to_H
+  tr_0 = (-D_edge*sqrt(D_edge*g_prime_tot)*0.5e3*Def_Rad) * GV%Z_to_H
 
   if (OBC%number_of_segments /= 1) then
     call MOM_error(WARNING, 'Error in DOME OBC segment setup', .true.)
@@ -375,8 +380,4 @@ subroutine DOME_set_OBC_data(OBC, tv, G, GV, param_file, tr_Reg)
 
 end subroutine DOME_set_OBC_data
 
-!> \namespace dome_initialization
-!!
-!! The module configures the model for the "DOME" experiment.
-!! DOME = Dynamics of Overflows and Mixing Experiment
 end module DOME_initialization

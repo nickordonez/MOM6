@@ -1,41 +1,7 @@
+!> Reports integrated quantities for monitoring the model state
 module MOM_sum_output
 
 ! This file is part of MOM6. See LICENSE.md for the license.
-
-!********+*********+*********+*********+*********+*********+*********+**
-!*                                                                     *
-!*  By Robert Hallberg, April 1994 - June 2002                         *
-!*                                                                     *
-!*    This file contains the subroutine (write_energy) that writes     *
-!*  horizontally integrated quantities, such as energies and layer     *
-!*  volumes, and other summary information to an output file.  Some    *
-!*  of these quantities (APE or resting interface height) are defined  *
-!*  relative to the global histogram of topography.  The subroutine    *
-!*  that compiles that histogram (depth_list_setup) is also included   *
-!*  in this file.                                                      *
-!*                                                                     *
-!*    In addition, if the number of velocity truncations since the     *
-!*  previous call to write_energy exceeds maxtrunc or the total energy *
-!*  exceeds a very large threshold, a fatal termination is triggered.  *
-!*                                                                     *
-!*    This file also contains a few miscelaneous initialization        *
-!*  calls to FMS-related modules.                                      *
-!*                                                                     *
-!*  Macros written all in capital letters are defined in MOM_memory.h. *
-!*                                                                     *
-!*     A small fragment of the grid is shown below:                    *
-!*                                                                     *
-!*    j+1  x ^ x ^ x   At x:  q                                        *
-!*    j+1  > o > o >   At ^:  v                                        *
-!*    j    x ^ x ^ x   At >:  u                                        *
-!*    j    > o > o >   At o:  h, bathyT                                *
-!*    j-1  x ^ x ^ x                                                   *
-!*        i-1  i  i+1  At x & ^:                                       *
-!*           i  i+1    At > & o:                                       *
-!*                                                                     *
-!*  The boundaries always run through q grid points (x).               *
-!*                                                                     *
-!********+*********+*********+*********+*********+*********+*********+**
 
 use MOM_coms, only : sum_across_PEs, PE_here, root_PE, num_PEs, max_across_PEs
 use MOM_coms, only : reproducing_sum, EFP_to_real, real_to_EFP
@@ -55,6 +21,7 @@ use MOM_time_manager, only : operator(+), operator(-), operator(*), operator(/)
 use MOM_time_manager, only : operator(/=), operator(<=), operator(>=), operator(<)
 use MOM_time_manager, only : get_calendar_type, time_type_to_real, NO_CALENDAR
 use MOM_tracer_flow_control, only : tracer_flow_control_CS, call_tracer_stocks
+use MOM_unit_scaling, only : unit_scale_type
 use MOM_variables, only : surface, thermo_var_ptrs
 use MOM_verticalGrid, only : verticalGrid_type
 
@@ -66,55 +33,52 @@ implicit none ; private
 
 public write_energy, accumulate_net_input, MOM_sum_output_init
 
-!-----------------------------------------------------------------------
+integer, parameter :: NUM_FIELDS = 17 !< Number of diagnostic fields
 
-integer, parameter :: NUM_FIELDS = 17
-
+!> A list of depths and corresponding globally integrated ocean area at each
+!! depth and the ocean volume below each depth.
 type :: Depth_List
-  real :: depth       ! A depth, in m.
-  real :: area        ! The cross-sectional area of the ocean at that depth, in m2.
-  real :: vol_below   ! The ocean volume below that depth, in m3.
+  real :: depth       !< A depth, in m.
+  real :: area        !< The cross-sectional area of the ocean at that depth, in m2.
+  real :: vol_below   !< The ocean volume below that depth, in m3.
 end type Depth_List
 
+!> The control structure for the MOM_sum_output module
 type, public :: sum_output_CS ; private
-  type(Depth_List), pointer, dimension(:) :: DL => NULL() ! The sorted depth list.
-  integer :: list_size          ! =niglobal*njglobal length of sorting vector
+  type(Depth_List), pointer, dimension(:) :: DL => NULL() !< The sorted depth list.
+  integer :: list_size          !< length of sorting vector <= niglobal*njglobal
 
-  integer ALLOCABLE_, dimension(NKMEM_) :: lH
-                                ! This saves the entry in DL with a volume just
-                                ! less than the volume of fluid below the
-                                ! interface.
-  logical :: do_APE_calc        !   If true, calculate the available potential
-                                ! energy of the interfaces.  Disabling this
-                                ! reduces the memory footprint of high-PE-count
-                                ! models dramatically.
-  logical :: read_depth_list    !   Read the depth list from a file if it exists
-                                ! and write it if it doesn't.
-  character(len=200) :: depth_list_file  ! The name of the depth list file.
-  real    :: D_list_min_inc     !   The minimum increment, in m, between the
-                                ! depths of the entries in the depth-list file,
-                                ! 0 by default.
-  logical :: use_temperature    !   If true, temperature and salinity are state
-                                ! variables.
-  real    :: fresh_water_input  !   The total mass of fresh water added by
-                                ! surface fluxes since the last time that
-  real    :: mass_prev          !   The total ocean mass the last time that
-                                ! write_energy was called, in kg.
-  real    :: salt_prev          !   The total amount of salt in the ocean the last
-                                ! time that write_energy was called, in PSU kg.
-  real    :: net_salt_input     !   The total salt added by surface fluxes since
-                                ! the last time that write_energy was called,
-                                ! in PSU kg.
-  real    :: heat_prev          !   The total amount of heat in the ocean the last
-                                ! time that write_energy was called, in Joules.
-  real    :: net_heat_input     !   The total heat added by surface fluxes since
-                                ! the last time that write_energy was called,
-                                ! in Joules.
-  type(EFP_type) :: &
-    fresh_water_in_EFP, &       ! These are extended fixed point versions of the
-    net_salt_in_EFP, &          ! correspondingly named variables above.
-    net_heat_in_EFP, heat_prev_EFP, salt_prev_EFP, mass_prev_EFP
-  real    :: dt                 ! The baroclinic dynamics time step, in s.
+  integer, allocatable, dimension(:) :: lH
+                                !< This saves the entry in DL with a volume just
+                                !! less than the volume of fluid below the interface.
+  logical :: do_APE_calc        !<   If true, calculate the available potential energy of the
+                                !! interfaces.  Disabling this reduces the memory footprint of
+                                !! high-PE-count models dramatically.
+  logical :: read_depth_list    !<   Read the depth list from a file if it exists
+                                !! and write it if it doesn't.
+  character(len=200) :: depth_list_file  !< The name of the depth list file.
+  real    :: D_list_min_inc     !<  The minimum increment, in Z, between the depths of the
+                                !! entries in the depth-list file, 0 by default.
+  logical :: use_temperature    !<   If true, temperature and salinity are state variables.
+  real    :: fresh_water_input  !<   The total mass of fresh water added by surface fluxes
+                                !! since the last time that write_energy was called, in kg.
+  real    :: mass_prev          !<   The total ocean mass the last time that
+                                !! write_energy was called, in kg.
+  real    :: salt_prev          !<   The total amount of salt in the ocean the last
+                                !! time that write_energy was called, in PSU kg.
+  real    :: net_salt_input     !<   The total salt added by surface fluxes since the last
+                                !! time that write_energy was called, in PSU kg.
+  real    :: heat_prev          !<  The total amount of heat in the ocean the last
+                                !! time that write_energy was called, in Joules.
+  real    :: net_heat_input     !<  The total heat added by surface fluxes since the last
+                                !! the last time that write_energy was called, in Joules.
+  type(EFP_type) :: fresh_water_in_EFP !< An extended fixed point version of fresh_water_input
+  type(EFP_type) :: net_salt_in_EFP !< An extended fixed point version of net_salt_input
+  type(EFP_type) :: net_heat_in_EFP !< An extended fixed point version of net_heat_input
+  type(EFP_type) :: heat_prev_EFP !< An extended fixed point version of heat_prev
+  type(EFP_type) :: salt_prev_EFP !< An extended fixed point version of salt_prev
+  type(EFP_type) :: mass_prev_EFP !< An extended fixed point version of mass_prev
+  real    :: dt                 !< The baroclinic dynamics time step, in s.
 
   type(time_type) :: energysavedays            !< The interval between writing the energies
                                                !! and other integral quantities of the run.
@@ -129,27 +93,25 @@ type, public :: sum_output_CS ; private
                                                !! of calls to write_energy and revert to the standard
                                                !! energysavedays interval
 
-  real    :: timeunit           !   The length of the units for the time
-                                ! axis, in s.
-  logical :: date_stamped_output ! If true, use dates (not times) in messages to stdout.
-  type(time_type) :: Start_time ! The start time of the simulation.
+  real    :: timeunit           !<  The length of the units for the time axis, in s.
+  logical :: date_stamped_output !< If true, use dates (not times) in messages to stdout.
+  type(time_type) :: Start_time !< The start time of the simulation.
                                 ! Start_time is set in MOM_initialization.F90
-  integer, pointer :: ntrunc => NULL() ! The number of times the velocity has been
-                                ! truncated since the last call to write_energy.
-  real    :: max_Energy         ! The maximum permitted energy per unit mass
-                                ! If there is more energy than this, the model
-                                ! should stop, in m2 s-2.
-  integer :: maxtrunc           ! The number of truncations per energy save
-                                ! interval at which the run is stopped.
-  logical :: write_stocks       ! If true, write the integrated tracer amounts
-                                ! to stdout when the energy files are written.
-  integer :: previous_calls = 0 ! The number of times write_energy has been called.
-  integer :: prev_n = 0         ! The value of n from the last call.
-  integer :: fileenergy_nc      ! NetCDF id of the energy file.
-  integer :: fileenergy_ascii   ! The unit number of the ascii version of the energy file.
+  integer, pointer :: ntrunc => NULL() !< The number of times the velocity has been
+                                !! truncated since the last call to write_energy.
+  real    :: max_Energy         !< The maximum permitted energy per unit mass.  If there is
+                                !! more energy than this, the model should stop, in m2 s-2.
+  integer :: maxtrunc           !< The number of truncations per energy save
+                                !! interval at which the run is stopped.
+  logical :: write_stocks       !< If true, write the integrated tracer amounts
+                                !! to stdout when the energy files are written.
+  integer :: previous_calls = 0 !< The number of times write_energy has been called.
+  integer :: prev_n = 0         !< The value of n from the last call.
+  integer :: fileenergy_nc      !< NetCDF id of the energy file.
+  integer :: fileenergy_ascii   !< The unit number of the ascii version of the energy file.
   type(fieldtype), dimension(NUM_FIELDS+MAX_FIELDS_) :: &
-             fields             ! fieldtype variables for the output fields.
-  character(len=200) :: energyfile  ! The name of the energy file with path.
+             fields             !< fieldtype variables for the output fields.
+  character(len=200) :: energyfile  !< The name of the energy file with path.
 end type sum_output_CS
 
 contains
@@ -167,15 +129,7 @@ subroutine MOM_sum_output_init(G, param_file, directory, ntrnc, &
   type(time_type),        intent(in)    :: Input_start_time !< The start time of the simulation.
   type(Sum_output_CS),    pointer       :: CS         !< A pointer that is set to point to the
                                                       !! control structure for this module.
-! Arguments: G - The ocean's grid structure.
-!  (in)      param_file - A structure indicating the open file to parse for
-!                         model parameter values.
-!  (in)      directory - The directory where the energy file goes.
-!  (in/out)  ntrnc - The integer that stores the number of times the velocity
-!                     has been truncated since the last call to write_energy.
-!  (in)      Input_start_time - The start time of the simulation.
-!  (in/out)  CS - A pointer that is set to point to the control structure
-!                 for this module
+  ! Local variables
   real :: Time_unit   ! The time unit in seconds for ENERGYSAVEDAYS.
   real :: Rho_0, maxvel
 ! This include declares and sets the variable "version".
@@ -258,8 +212,8 @@ subroutine MOM_sum_output_init(G, param_file, directory, ntrnc, &
                    "create that file otherwise.", default=.false.)
     call get_param(param_file, mdl, "DEPTH_LIST_MIN_INC", CS%D_list_min_inc, &
                    "The minimum increment between the depths of the \n"//&
-                   "entries in the depth-list file.", units="m", &
-                   default=1.0E-10)
+                   "entries in the depth-list file.", &
+                   units="m", default=1.0E-10, scale=1.0/G%Zd_to_m)
     if (CS%read_depth_list) then
       call get_param(param_file, mdl, "DEPTH_LIST_FILE", CS%depth_list_file, &
                    "The name of the depth list file.", default="Depth_list.nc")
@@ -267,7 +221,7 @@ subroutine MOM_sum_output_init(G, param_file, directory, ntrnc, &
         CS%depth_list_file = trim(slasher(directory))//trim(CS%depth_list_file)
     endif
 
-    ALLOC_(CS%lH(G%ke))
+    allocate(CS%lH(G%ke))
     call depth_list_setup(G, CS)
   else
     CS%list_size = 0
@@ -304,8 +258,7 @@ subroutine MOM_sum_output_end(CS)
                                       !! previous call to MOM_sum_output_init.
   if (associated(CS)) then
     if (CS%do_APE_calc) then
-      DEALLOC_(CS%lH)
-      deallocate(CS%DL)
+      deallocate(CS%lH, CS%DL)
     endif
 
     deallocate(CS)
@@ -314,9 +267,10 @@ end subroutine MOM_sum_output_end
 
 !>  This subroutine calculates and writes the total model energy, the energy and
 !! mass of each layer, and other globally integrated  physical quantities.
-subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forcing)
+subroutine write_energy(u, v, h, tv, day, n, G, GV, US, CS, tracer_CSp, OBC, dt_forcing)
   type(ocean_grid_type),   intent(in)    :: G   !< The ocean's grid structure.
   type(verticalGrid_type), intent(in)    :: GV  !< The ocean's vertical grid structure.
+  type(unit_scale_type),   intent(in)    :: US  !< A dimensional unit scaling type
   real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), &
                            intent(in)    :: u   !< The zonal velocity, in m s-1.
   real, dimension(SZI_(G),SZJB_(G),SZK_(G)), &
@@ -335,22 +289,22 @@ subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forc
   type(ocean_OBC_type),         &
                     optional, pointer    :: OBC !< Open boundaries control structure.
   type(time_type),  optional, intent(in) :: dt_forcing !< The forcing time step
-
-  real :: eta(SZI_(G),SZJ_(G),SZK_(G)+1) ! The height of interfaces, in m.
+  ! Local variables
+  real :: eta(SZI_(G),SZJ_(G),SZK_(G)+1) ! The height of interfaces, in Z.
   real :: areaTm(SZI_(G),SZJ_(G)) ! A masked version of areaT, in m2.
   real :: KE(SZK_(G))  ! The total kinetic energy of a layer, in J.
   real :: PE(SZK_(G)+1)! The available potential energy of an interface, in J.
   real :: KE_tot       ! The total kinetic energy, in J.
   real :: PE_tot       ! The total available potential energy, in J.
-  real :: H_0APE(SZK_(G)+1) ! The uniform depth which overlies the same
-                       ! volume as is below an interface, in m.
-                       ! H is usually positive.
+  real :: Z_0APE(SZK_(G)+1) ! The uniform depth which overlies the same
+                       ! volume as is below an interface, in Z.
+  real :: H_0APE(SZK_(G)+1) ! A version of Z_0APE, converted to m, usually positive.
   real :: toten        ! The total kinetic & potential energies of
                        ! all layers, in Joules (i.e. kg m2 s-2).
   real :: En_mass      ! The total kinetic and potential energies divided by
                        ! the total mass of the ocean, in m2 s-2.
-  real :: vol_lay(SZK_(G))  ! The volume of fluid in a layer, in m3.
-  real :: volbelow     ! The volume of all layers beneath an interface in m3.
+  real :: vol_lay(SZK_(G))  ! The volume of fluid in a layer, in Z m2.
+  real :: volbelow     ! The volume of all layers beneath an interface in Z m2.
   real :: mass_lay(SZK_(G)) ! The mass of fluid in a layer, in kg.
   real :: mass_tot     ! The total mass of the ocean in kg.
   real :: vol_tot      ! The total ocean volume in m3.
@@ -380,12 +334,11 @@ subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forc
   real :: temp_anom    ! The change in total heat that cannot be accounted for
                        ! by the surface fluxes, divided by the total heat
                        ! capacity of the ocean, in C.
-  real :: hint         ! The deviation of an interface from H, in m.
+  real :: hint         ! The deviation of an interface from H, in Z.
   real :: hbot         ! 0 if the basin is deeper than H, or the
                        ! height of the basin depth over H otherwise,
-                       ! in m. This makes PE only include real fluid.
-  real :: hbelow       ! The depth of fluid in all layers beneath
-                       ! an interface, in m.
+                       ! in Z. This makes PE only include real fluid.
+  real :: hbelow       ! The depth of fluid in all layers beneath an interface, in Z.
   type(EFP_type) :: &
     mass_EFP, &        ! Extended fixed point sums of total mass, etc.
     salt_EFP, heat_EFP, salt_chg_EFP, heat_chg_EFP, mass_chg_EFP, &
@@ -393,37 +346,35 @@ subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forc
   real :: CFL_trans    ! A transport-based definition of the CFL number, nondim.
   real :: CFL_lin      ! A simpler definition of the CFL number, nondim.
   real :: max_CFL(2)   ! The maxima of the CFL numbers, nondim.
-  real :: Irho0
+  real :: Irho0        ! The inverse of the reference density, in m3 kg-1.
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)) :: &
-    tmp1
+    tmp1               ! A temporary array
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: &
-    PE_pt
+    PE_pt              ! The potential energy at each point, in J.
   real, dimension(SZI_(G),SZJ_(G)) :: &
-    Temp_int, Salt_int
-  real :: H_to_m, H_to_kg_m2  ! Local copies of unit conversion factors.
+    Temp_int, Salt_int ! Layer and cell integrated heat and salt, in J and g Salt.
+  real :: H_to_kg_m2   ! Local copy of a unit conversion factor.
   integer :: num_nc_fields  ! The number of fields that will actually go into
                             ! the NetCDF file.
   integer :: i, j, k, is, ie, js, je, ns, nz, m, Isq, Ieq, Jsq, Jeq
-  integer :: l, lbelow, labove   ! indices of deep_area_vol, used to find
-                                 ! H.  lbelow & labove are lower & upper
-                                 ! limits for l in the search for lH.
+  integer :: l, lbelow, labove   ! indices of deep_area_vol, used to find Z_0APE.
+                                 ! lbelow & labove are lower & upper limits for l
+                                 ! in the search for the entry in lH to use.
   integer :: start_of_day, num_days
   real    :: reday, var
   character(len=240) :: energypath_nc
   character(len=200) :: mesg
   character(len=32)  :: mesg_intro, time_units, day_str, n_str, date_str
   logical :: date_stamped
-  type(time_type) :: dt_force
+  type(time_type) :: dt_force ! A time_type version of the forcing timestep.
   real :: Tr_stocks(MAX_FIELDS_)
-  real :: Tr_min(MAX_FIELDS_),Tr_max(MAX_FIELDS_)
+  real :: Tr_min(MAX_FIELDS_), Tr_max(MAX_FIELDS_)
   real :: Tr_min_x(MAX_FIELDS_), Tr_min_y(MAX_FIELDS_), Tr_min_z(MAX_FIELDS_)
   real :: Tr_max_x(MAX_FIELDS_), Tr_max_y(MAX_FIELDS_), Tr_max_z(MAX_FIELDS_)
   logical :: Tr_minmax_got(MAX_FIELDS_) = .false.
   character(len=40), dimension(MAX_FIELDS_) :: &
     Tr_names, Tr_units
   integer :: nTr_stocks
-  real, allocatable :: toten_PE(:)
-  integer :: pe_num
   integer :: iyear, imonth, iday, ihour, iminute, isecond, itick ! For call to get_date()
   logical :: local_open_BC
   type(OBC_segment_type), pointer :: segment => NULL()
@@ -493,7 +444,7 @@ subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forc
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = G%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
-  H_to_m = GV%H_to_m ; H_to_kg_m2 = GV%H_to_kg_m2
+  H_to_kg_m2 = GV%H_to_kg_m2
 
   if (.not.associated(CS)) call MOM_error(FATAL, &
          "write_energy: Module must be initialized before it is used.")
@@ -537,7 +488,7 @@ subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forc
     endif
 
     mass_tot = reproducing_sum(tmp1, sums=mass_lay, EFP_sum=mass_EFP)
-    do k=1,nz ; vol_lay(k) = (H_to_m/H_to_kg_m2)*mass_lay(k) ; enddo
+    do k=1,nz ; vol_lay(k) = (GV%H_to_Z/H_to_kg_m2)*mass_lay(k) ; enddo
   else
     tmp1(:,:,:) = 0.0
     if (CS%do_APE_calc) then
@@ -546,17 +497,17 @@ subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forc
       enddo ; enddo ; enddo
       mass_tot = reproducing_sum(tmp1, sums=mass_lay, EFP_sum=mass_EFP)
 
-      call find_eta(h, tv, GV%g_Earth, G, GV, eta)
+      call find_eta(h, tv, G, GV, US, eta)
       do k=1,nz ; do j=js,je ; do i=is,ie
         tmp1(i,j,k) = (eta(i,j,K)-eta(i,j,K+1)) * areaTm(i,j)
       enddo ; enddo ; enddo
-      vol_tot = H_to_m*reproducing_sum(tmp1, sums=vol_lay)
+      vol_tot = US%Z_to_m*reproducing_sum(tmp1, sums=vol_lay)
     else
       do k=1,nz ; do j=js,je ; do i=is,ie
         tmp1(i,j,k) = H_to_kg_m2 * h(i,j,k) * areaTm(i,j)
       enddo ; enddo ; enddo
       mass_tot = reproducing_sum(tmp1, sums=mass_lay, EFP_sum=mass_EFP)
-      do k=1,nz ; vol_lay(k) = mass_lay(k) / GV%Rho0 ; enddo
+      do k=1,nz ; vol_lay(k) = US%m_to_Z * (mass_lay(k) / GV%Rho0) ; enddo
     endif
   endif ! Boussinesq
 
@@ -663,11 +614,43 @@ subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forc
         CS%lH(k) = l
       endif
       lbelow = l
-      H_0APE(K) = CS%DL(l)%depth - (volbelow - CS%DL(l)%vol_below) / CS%DL(l)%area
+      Z_0APE(K) = CS%DL(l)%depth - (volbelow - CS%DL(l)%vol_below) / CS%DL(l)%area
     enddo
-    H_0APE(nz+1) = CS%DL(2)%depth
+    Z_0APE(nz+1) = CS%DL(2)%depth
+
+    !   Calculate the Available Potential Energy integrated over each
+    ! interface.  With a nonlinear equation of state or with a bulk
+    ! mixed layer this calculation is only approximate.  With an ALE model
+    ! this does not make sense.
+    PE_pt(:,:,:) = 0.0
+    if (GV%Boussinesq) then
+      do j=js,je ; do i=is,ie
+        hbelow = 0.0
+        do k=nz,1,-1
+          hbelow = hbelow + h(i,j,k) * GV%H_to_Z
+          hint = Z_0APE(K) + (hbelow - G%bathyT(i,j))
+          hbot = Z_0APE(K) - G%bathyT(i,j)
+          hbot = (hbot + ABS(hbot)) * 0.5
+          PE_pt(i,j,K) = 0.5 * areaTm(i,j) * US%Z_to_m*(GV%Rho0*GV%g_prime(K)) * &
+                  (hint * hint - hbot * hbot)
+        enddo
+      enddo ; enddo
+    else
+      do j=js,je ; do i=is,ie
+        do k=nz,1,-1
+          hint = Z_0APE(K) + eta(i,j,K)  ! eta and H_0 have opposite signs.
+          hbot = max(Z_0APE(K) - G%bathyT(i,j), 0.0)
+          PE_pt(i,j,K) = 0.5 * (areaTm(i,j) * US%Z_to_m*(GV%Rho0*GV%g_prime(K))) * &
+                  (hint * hint - hbot * hbot)
+        enddo
+      enddo ; enddo
+    endif
+
+    PE_tot = reproducing_sum(PE_pt, sums=PE)
+    do k=1,nz+1 ; H_0APE(K) = US%Z_to_m*Z_0APE(K) ; enddo
   else
-    do k=1,nz+1 ; H_0APE(K) = 0.0 ; enddo
+    PE_tot = 0.0
+    do k=1,nz+1 ; PE(K) = 0.0 ; H_0APE(K) = 0.0 ; enddo
   endif
 
 ! Calculate the Kinetic Energy integrated over each layer.
@@ -676,42 +659,8 @@ subroutine write_energy(u, v, h, tv, day, n, G, GV, CS, tracer_CSp, OBC, dt_forc
     tmp1(i,j,k) = (0.25 * H_to_kg_m2 * (areaTm(i,j) * h(i,j,k))) * &
             (u(I-1,j,k)**2 + u(I,j,k)**2 + v(i,J-1,k)**2 + v(i,J,k)**2)
   enddo ; enddo ; enddo
-
-!   Calculate the Available Potential Energy integrated over each
-! interface.  With a nonlinear equation of state or with a bulk
-! mixed layer this calculation is only approximate.
-  do k=1,nz+1 ; PE(K) = 0.0 ; enddo
-  if (CS%do_APE_calc) then
-    PE_pt(:,:,:) = 0.0
-    if (GV%Boussinesq) then
-      do j=js,je ; do i=is,ie
-        hbelow = 0.0
-        do k=nz,1,-1
-          hbelow = hbelow + h(i,j,k) * H_to_m
-          hint = H_0APE(K) + (hbelow - G%bathyT(i,j))
-          hbot = H_0APE(K) - G%bathyT(i,j)
-          hbot = (hbot + ABS(hbot)) * 0.5
-          PE_pt(i,j,K) = 0.5 * areaTm(i,j) * (GV%Rho0*GV%g_prime(K)) * &
-                  (hint * hint - hbot * hbot)
-        enddo
-      enddo ; enddo
-    else
-      do j=js,je ; do i=is,ie
-        hbelow = 0.0
-        do k=nz,1,-1
-          hint = H_0APE(K) + eta(i,j,K)  ! eta and H_0 have opposite signs.
-          hbot = max(H_0APE(K) - G%bathyT(i,j), 0.0)
-          PE_pt(i,j,K) = 0.5 * (areaTm(i,j) * (GV%Rho0*GV%g_prime(K))) * &
-                  (hint * hint - hbot * hbot)
-        enddo
-      enddo ; enddo
-    endif
-  endif
-
   KE_tot = reproducing_sum(tmp1, sums=KE)
-  PE_tot = 0.0
-  if (CS%do_APE_calc) &
-    PE_tot = reproducing_sum(PE_pt, sums=PE)
+
   toten = KE_tot + PE_tot
 
   Salt = 0.0 ; Heat = 0.0
@@ -960,7 +909,7 @@ subroutine accumulate_net_input(fluxes, sfc_state, dt, G, CS)
   type(ocean_grid_type), intent(in) :: G      !< The ocean's grid structure.
   type(Sum_output_CS),   pointer    :: CS     !< The control structure returned by a previous call
                                               !! to MOM_sum_output_init.
-
+  ! Local variables
   real, dimension(SZI_(G),SZJ_(G)) :: &
     FW_in, &   ! The net fresh water input, integrated over a timestep in kg.
     salt_in, & ! The total salt added by surface fluxes, integrated
@@ -1078,11 +1027,7 @@ subroutine depth_list_setup(G, CS)
   type(ocean_grid_type), intent(in) :: G    !< The ocean's grid structure
   type(Sum_output_CS),   pointer    :: CS  !< The control structure returned by a
                                            !! previous call to MOM_sum_output_init.
-!  This subroutine sets up an ordered list of depths, along with the
-! cross sectional areas at each depth and the volume of fluid deeper
-! than each depth.  This might be read from a previously created file
-! or it might be created anew.  (For now only new creation occurs.
-
+  ! Local variables
   integer :: k
 
   if (CS%read_depth_list) then
@@ -1111,17 +1056,17 @@ subroutine create_depth_list(G, CS)
   type(ocean_grid_type), intent(in) :: G  !< The ocean's grid structure.
   type(Sum_output_CS),   pointer    :: CS !< The control structure set up in MOM_sum_output_init,
                                           !! in which the ordered depth list is stored.
-
+  ! Local variables
   real, dimension(G%Domain%niglobal*G%Domain%njglobal + 1) :: &
-    Dlist, &  !< The global list of bottom depths, in m.
+    Dlist, &  !< The global list of bottom depths, in Z.
     AreaList  !< The global list of cell areas, in m2.
   integer, dimension(G%Domain%niglobal*G%Domain%njglobal+1) :: &
     indx2     !< The position of an element in the original unsorted list.
-  real    :: Dnow  !< The depth now being considered for sorting, in m.
-  real    :: Dprev !< The most recent depth that was considered, in m.
-  real    :: vol   !< The running sum of open volume below a deptn, in m3.
+  real    :: Dnow  !< The depth now being considered for sorting, in Z.
+  real    :: Dprev !< The most recent depth that was considered, in Z.
+  real    :: vol   !< The running sum of open volume below a deptn, in Z m2.
   real    :: area  !< The open area at the current depth, in m2.
-  real    :: D_list_prev !< The most recent depth added to the list, in m.
+  real    :: D_list_prev !< The most recent depth added to the list, in Z.
   logical :: add_to_list !< This depth should be included as an entry on the list.
 
   integer :: ir, indxt
@@ -1238,9 +1183,7 @@ subroutine write_depth_list(G, CS, filename, list_size)
                                            !! previous call to MOM_sum_output_init.
   character(len=*),      intent(in) :: filename !< The path to the depth list file to write.
   integer,               intent(in) :: list_size !< The size of the depth list.
-
-! This subroutine writes out the depth list to the specified file.
-
+  ! Local variables
   real, allocatable :: tmp(:)
   integer :: ncid, dimid(1), Did, Aid, Vid, status, k
 
@@ -1292,7 +1235,7 @@ subroutine write_depth_list(G, CS, filename, list_size)
   if (status /= NF90_NOERR) call MOM_error(WARNING, &
       filename//trim(NF90_STRERROR(status)))
 
-  do k=1,list_size ; tmp(k) = CS%DL(k)%depth ; enddo
+  do k=1,list_size ; tmp(k) = G%Zd_to_m*CS%DL(k)%depth ; enddo
   status = NF90_PUT_VAR(ncid, Did, tmp)
   if (status /= NF90_NOERR) call MOM_error(WARNING, &
       filename//" depth "//trim(NF90_STRERROR(status)))
@@ -1302,7 +1245,7 @@ subroutine write_depth_list(G, CS, filename, list_size)
   if (status /= NF90_NOERR) call MOM_error(WARNING, &
       filename//" area "//trim(NF90_STRERROR(status)))
 
-  do k=1,list_size ; tmp(k) = CS%DL(k)%vol_below ; enddo
+  do k=1,list_size ; tmp(k) = G%Zd_to_m*CS%DL(k)%vol_below ; enddo
   status = NF90_PUT_VAR(ncid, Vid, tmp)
   if (status /= NF90_NOERR) call MOM_error(WARNING, &
       filename//" vol_below "//trim(NF90_STRERROR(status)))
@@ -1320,16 +1263,16 @@ subroutine read_depth_list(G, CS, filename)
   type(Sum_output_CS),   pointer    :: CS  !< The control structure returned by a
                                            !! previous call to MOM_sum_output_init.
   character(len=*),      intent(in) :: filename !< The path to the depth list file to read.
-
-! This subroutine reads in the depth list to the specified file
-! and allocates and sets up CS%DL and CS%list_size .
+  ! Local variables
   character(len=32) :: mdl
   character(len=240) :: var_name, var_msg
   real, allocatable :: tmp(:)
+  real    :: m_to_Z
   integer :: ncid, status, varid, list_size, k
   integer :: ndim, len, var_dim_ids(NF90_MAX_VAR_DIMS)
 
   mdl = "MOM_sum_output read_depth_list:"
+  m_to_Z = 1.0/G%Zd_to_m
 
   status = NF90_OPEN(filename, NF90_NOWRITE, ncid)
   if (status /= NF90_NOERR) then
@@ -1368,7 +1311,7 @@ subroutine read_depth_list(G, CS, filename)
         " Difficulties reading variable "//trim(var_msg)//&
         trim(NF90_STRERROR(status)))
 
-  do k=1,list_size ; CS%DL(k)%depth = tmp(k) ; enddo
+  do k=1,list_size ; CS%DL(k)%depth = m_to_Z*tmp(k) ; enddo
 
   var_name = "area"
   var_msg = trim(var_name)//" in "//trim(filename)//" - "
@@ -1394,7 +1337,7 @@ subroutine read_depth_list(G, CS, filename)
         " Difficulties reading variable "//trim(var_msg)//&
         trim(NF90_STRERROR(status)))
 
-  do k=1,list_size ; CS%DL(k)%vol_below = tmp(k) ; enddo
+  do k=1,list_size ; CS%DL(k)%vol_below = m_to_Z*tmp(k) ; enddo
 
   status = NF90_CLOSE(ncid)
   if (status /= NF90_NOERR) call MOM_error(WARNING, mdl// &
@@ -1403,5 +1346,21 @@ subroutine read_depth_list(G, CS, filename)
   deallocate(tmp)
 
 end subroutine read_depth_list
+
+!> \namespace mom_sum_output
+!!
+!! By Robert Hallberg, April 1994 - June 2002
+!!
+!!   This file contains the subroutine (write_energy) that writes
+!! horizontally integrated quantities, such as energies and layer
+!! volumes, and other summary information to an output file.  Some
+!! of these quantities (APE or resting interface height) are defined
+!! relative to the global histogram of topography.  The subroutine
+!! that compiles that histogram (depth_list_setup) is also included
+!! in this file.
+!!
+!!   In addition, if the number of velocity truncations since the
+!! previous call to write_energy exceeds maxtrunc or the total energy
+!! exceeds a very large threshold, a fatal termination is triggered.
 
 end module MOM_sum_output

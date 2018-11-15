@@ -1,3 +1,4 @@
+!> Orchestrates the registration and calling of tracer packages
 module MOM_tracer_flow_control
 
 ! This file is part of MOM6. See LICENSE.md for the license.
@@ -15,6 +16,7 @@ use MOM_restart, only : MOM_restart_CS
 use MOM_sponge, only : sponge_CS
 use MOM_ALE_sponge, only : ALE_sponge_CS
 use MOM_tracer_registry, only : tracer_registry_type
+use MOM_unit_scaling, only : unit_scale_type
 use MOM_variables, only : surface, thermo_var_ptrs
 use MOM_verticalGrid, only : verticalGrid_type
 #include <MOM_memory.h>
@@ -67,19 +69,21 @@ public call_tracer_register, tracer_flow_control_init, call_tracer_set_forcing
 public call_tracer_column_fns, call_tracer_surface_state, call_tracer_stocks
 public call_tracer_flux_init, get_chl_from_model, tracer_flow_control_end
 
+!> The control structure for orchestrating the calling of tracer packages
 type, public :: tracer_flow_control_CS ; private
-  logical :: use_USER_tracer_example = .false.
-  logical :: use_DOME_tracer = .false.
-  logical :: use_ISOMIP_tracer = .false.
-  logical :: use_ideal_age = .false.
-  logical :: use_regional_dyes = .false.
-  logical :: use_oil = .false.
-  logical :: use_advection_test_tracer = .false.
-  logical :: use_OCMIP2_CFC = .false.
-  logical :: use_MOM_generic_tracer = .false.
-  logical :: use_pseudo_salt_tracer = .false.
-  logical :: use_boundary_impulse_tracer = .false.
-  logical :: use_dyed_obc_tracer = .false.
+  logical :: use_USER_tracer_example = .false.     !< If true, use the USER_tracer_example package
+  logical :: use_DOME_tracer = .false.             !< If true, use the DOME_tracer package
+  logical :: use_ISOMIP_tracer = .false.           !< If true, use the ISOMPE_tracer package
+  logical :: use_ideal_age = .false.               !< If true, use the ideal age tracer package
+  logical :: use_regional_dyes = .false.           !< If true, use the regional dyes tracer package
+  logical :: use_oil = .false.                     !< If true, use the oil tracer package
+  logical :: use_advection_test_tracer = .false.   !< If true, use the advection_test_tracer package
+  logical :: use_OCMIP2_CFC = .false.              !< If true, use the OCMIP2_CFC tracer package
+  logical :: use_MOM_generic_tracer = .false.      !< If true, use the MOM_generic_tracer packages
+  logical :: use_pseudo_salt_tracer = .false.      !< If true, use the psuedo_salt tracer  package
+  logical :: use_boundary_impulse_tracer = .false. !< If true, use the boundary impulse tracer package
+  logical :: use_dyed_obc_tracer = .false.         !< If true, use the dyed OBC tracer package
+  !>@{ Pointers to the control strucures for the tracer packages
   type(USER_tracer_example_CS), pointer :: USER_tracer_example_CSp => NULL()
   type(DOME_tracer_CS), pointer :: DOME_tracer_CSp => NULL()
   type(ISOMIP_tracer_CS), pointer :: ISOMIP_tracer_CSp => NULL()
@@ -94,6 +98,7 @@ type, public :: tracer_flow_control_CS ; private
   type(pseudo_salt_tracer_CS), pointer :: pseudo_salt_tracer_CSp => NULL()
   type(boundary_impulse_tracer_CS), pointer :: boundary_impulse_tracer_CSp => NULL()
   type(dyed_obc_tracer_CS), pointer :: dyed_obc_tracer_CSp => NULL()
+  !!@}
 end type tracer_flow_control_CS
 
 contains
@@ -137,9 +142,10 @@ end subroutine call_tracer_flux_init
 !> The following 5 subroutines and associated definitions provide the
 !! machinery to register and call the subroutines that initialize
 !! tracers and apply vertical column processes to tracers.
-subroutine call_tracer_register(HI, GV, param_file, CS, tr_Reg, restart_CS)
+subroutine call_tracer_register(HI, GV, US, param_file, CS, tr_Reg, restart_CS)
   type(hor_index_type),         intent(in) :: HI         !< A horizontal index type structure.
   type(verticalGrid_type),      intent(in) :: GV         !< The ocean's vertical grid structure.
+  type(unit_scale_type),        intent(in) :: US         !< A dimensional unit scaling type
   type(param_file_type),        intent(in) :: param_file !< A structure to parse for run-time
                                                          !! parameters.
   type(tracer_flow_control_CS), pointer    :: CS         !< A pointer that is set to point to the
@@ -233,7 +239,7 @@ subroutine call_tracer_register(HI, GV, param_file, CS, tr_Reg, restart_CS)
     register_ideal_age_tracer(HI, GV, param_file,  CS%ideal_age_tracer_CSp, &
                               tr_Reg, restart_CS)
   if (CS%use_regional_dyes) CS%use_regional_dyes = &
-    register_dye_tracer(HI, GV, param_file,  CS%dye_tracer_CSp, &
+    register_dye_tracer(HI, GV, US, param_file,  CS%dye_tracer_CSp, &
                         tr_Reg, restart_CS)
   if (CS%use_oil) CS%use_oil = &
     register_oil_tracer(HI, GV, param_file,  CS%oil_tracer_CSp, &
@@ -264,7 +270,7 @@ end subroutine call_tracer_register
 
 !> This subroutine calls all registered tracer initialization
 !! subroutines.
-subroutine tracer_flow_control_init(restart, day, G, GV, h, param_file, diag, OBC, &
+subroutine tracer_flow_control_init(restart, day, G, GV, US, h, param_file, diag, OBC, &
                                     CS, sponge_CSp, ALE_sponge_CSp, diag_to_Z_CSp, tv)
   logical,                               intent(in)    :: restart !< 1 if the fields have already
                                                                   !! been read from a restart file.
@@ -272,6 +278,7 @@ subroutine tracer_flow_control_init(restart, day, G, GV, h, param_file, diag, OB
   type(ocean_grid_type),                 intent(inout) :: G       !< The ocean's grid structure.
   type(verticalGrid_type),               intent(in)    :: GV      !< The ocean's vertical grid
                                                                   !! structure.
+  type(unit_scale_type),                 intent(in)    :: US      !< A dimensional unit scaling type
   real, dimension(NIMEM_,NJMEM_,NKMEM_), intent(in)    :: h       !< Layer thicknesses, in H
                                                                   !! (usually m or kg m-2)
   type(param_file_type),                 intent(in)    :: param_file !< A structure to parse for
@@ -304,7 +311,7 @@ subroutine tracer_flow_control_init(restart, day, G, GV, h, param_file, diag, OB
     call USER_initialize_tracer(restart, day, G, GV, h, diag, OBC, CS%USER_tracer_example_CSp, &
                                 sponge_CSp, diag_to_Z_CSp)
   if (CS%use_DOME_tracer) &
-    call initialize_DOME_tracer(restart, day, G, GV, h, diag, OBC, CS%DOME_tracer_CSp, &
+    call initialize_DOME_tracer(restart, day, G, GV, US, h, diag, OBC, CS%DOME_tracer_CSp, &
                                 sponge_CSp, diag_to_Z_CSp, param_file)
   if (CS%use_ISOMIP_tracer) &
     call initialize_ISOMIP_tracer(restart, day, G, GV, h, diag, OBC, CS%ISOMIP_tracer_CSp, &
